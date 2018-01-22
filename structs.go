@@ -2,7 +2,10 @@
 package structs
 
 import (
+	"encoding"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"reflect"
 )
@@ -17,9 +20,10 @@ var (
 // Struct encapsulates a struct type to provide several high level functions
 // around the struct.
 type Struct struct {
-	raw     interface{}
-	value   reflect.Value
-	TagName string
+	raw              interface{}
+	value            reflect.Value
+	TagName          string
+	FlattenAnonymous bool
 }
 
 // New returns a new *Struct with the struct s. It panics if the s's kind is
@@ -139,13 +143,41 @@ func (s *Struct) FillMap(out map[string]interface{}) {
 			continue
 		}
 
-		if isSubStruct && (tagOpts.Has("flatten")) {
+		if isSubStruct && (tagOpts.Has("flatten") || (field.Anonymous && s.FlattenAnonymous)) {
 			for k := range finalVal.(map[string]interface{}) {
 				out[k] = finalVal.(map[string]interface{})[k]
 			}
 		} else {
 			out[name] = finalVal
 		}
+	}
+}
+
+// Map struct with string values instead of interface{}
+func (s *Struct) MapString() map[string]string {
+	out := make(map[string]string)
+	s.FillMapString(out)
+	return out
+}
+
+// Map struct with string values instead of interface{}
+func (s *Struct) FillMapString(out map[string]string) {
+	for fn, fv := range s.Map() {
+		out[fn] = s.stringValue(fv)
+	}
+}
+
+// Map struct with string list values instead of interface{}
+func (s *Struct) MapStringList() map[string][]string {
+	out := make(map[string][]string)
+	s.FillMapStringList(out)
+	return out
+}
+
+// Map struct with string list values instead of interface{}
+func (s *Struct) FillMapStringList(out map[string][]string) {
+	for fn, fv := range s.Map() {
+		out[fn] = s.stringListValue(fv)
 	}
 }
 
@@ -207,6 +239,17 @@ func (s *Struct) Values() []interface{} {
 		} else {
 			t = append(t, val.Interface())
 		}
+	}
+
+	return t
+}
+
+// Returns struct values as string
+func (s *Struct) ValuesString() []string {
+	var t []string
+
+	for _, fv := range s.Values() {
+		t = append(t, s.stringValue(fv))
 	}
 
 	return t
@@ -425,6 +468,53 @@ func (s *Struct) structFields() []reflect.StructField {
 	return f
 }
 
+func (s *Struct) stringListValue(val interface{}) []string {
+	// map[string]interface{}
+	if str, ok := val.(map[string]interface{}); ok {
+		var t []string
+		for _, fv := range str {
+			for _, fi := range s.stringListValue(fv) {
+				t = append(t, fi)
+			}
+		}
+		return t
+	}
+
+	// textMarshaler
+	if str, ok := val.(encoding.TextMarshaler); ok {
+		if st, err := str.MarshalText(); err == nil {
+			return []string{string(st)}
+		}
+	}
+
+	// fmt.Stringer
+	if str, ok := val.(fmt.Stringer); ok {
+		return []string{str.String()}
+	}
+
+	// special case for `json` tag
+	if s.TagName == "json" {
+		if str, ok := val.(json.Marshaler); ok {
+			if st, err := str.MarshalJSON(); err == nil {
+				return []string{string(st)}
+			}
+		}
+	}
+
+	// use Sprintf's %v to convert to string
+	return []string{fmt.Sprintf("%v", val)}
+}
+
+func (s *Struct) stringValue(val interface{}) string {
+	v := s.stringListValue(val)
+	if len(v) == 0 {
+		return ""
+	} else if len(v) == 1 {
+		return v[0]
+	}
+	return strings.Join(v, ",")
+}
+
 func strctVal(s interface{}) reflect.Value {
 	v := reflect.ValueOf(s)
 
@@ -450,6 +540,30 @@ func Map(s interface{}) map[string]interface{} {
 // given map.
 func FillMap(s interface{}, out map[string]interface{}) {
 	New(s).FillMap(out)
+}
+
+// MapString converts the given struct to a map[string]string. For more info
+// refer to Struct types MapString() method. It panics if s's kind is not struct.
+func MapString(s interface{}) map[string]string {
+	return New(s).MapString()
+}
+
+// FillMapString is the same as MapString. Instead of returning the output, it fills the
+// given map.
+func FillMapString(s interface{}, out map[string]string) {
+	New(s).FillMapString(out)
+}
+
+// MapStringList converts the given struct to a map[string][]string. For more info
+// refer to Struct types MapStringList() method. It panics if s's kind is not struct.
+func MapStringList(s interface{}) map[string][]string {
+	return New(s).MapStringList()
+}
+
+// FillMapStringList is the same as MapStringList. Instead of returning the output, it fills the
+// given map.
+func FillMapStringList(s interface{}, out map[string][]string) {
+	New(s).FillMapStringList(out)
 }
 
 // Values converts the given struct to a []interface{}. For more info refer to
@@ -518,6 +632,7 @@ func (s *Struct) nested(val reflect.Value) interface{} {
 	case reflect.Struct:
 		n := New(val.Interface())
 		n.TagName = s.TagName
+		n.FlattenAnonymous = s.FlattenAnonymous
 		m := n.Map()
 
 		// do not add the converted value if there are no exported fields, ie:
