@@ -442,6 +442,25 @@ func (s *Struct) Name() string {
 	return s.value.Type().Name()
 }
 
+// structFieldsCount returns the count of exported struct fields for a given s struct.
+func (s *Struct) structFieldsCount() int {
+	t := s.value.Type()
+
+	var ct int
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		// we can't access the value of unexported fields
+		if field.PkgPath != "" {
+			continue
+		}
+
+		ct++
+	}
+
+	return ct
+}
+
 // structFields returns the exported struct fields for a given s struct. This
 // is a convenient helper method to avoid duplicate code in some of the
 // functions.
@@ -469,8 +488,24 @@ func (s *Struct) structFields() []reflect.StructField {
 }
 
 func (s *Struct) stringListValue(val interface{}) []string {
+	if val == nil {
+		return []string{}
+	}
+
+	// if is nil pointer or pointer to nil pointer, return blank
+	xval := reflect.ValueOf(val)
+	if xval.Kind() == reflect.Ptr {
+		if xval.IsNil() {
+			return []string{}
+		}
+		xval = xval.Elem()
+		if xval.Kind() == reflect.Ptr && xval.IsNil() {
+			return []string{}
+		}
+	}
+
 	// map[string]interface{}
-	if str, ok := val.(map[string]interface{}); ok {
+	if str, ok := xval.Interface().(map[string]interface{}); ok {
 		var t []string
 		for _, fv := range str {
 			for _, fi := range s.stringListValue(fv) {
@@ -481,20 +516,20 @@ func (s *Struct) stringListValue(val interface{}) []string {
 	}
 
 	// textMarshaler
-	if str, ok := val.(encoding.TextMarshaler); ok {
+	if str, ok := xval.Interface().(encoding.TextMarshaler); ok {
 		if st, err := str.MarshalText(); err == nil {
 			return []string{string(st)}
 		}
 	}
 
 	// fmt.Stringer
-	if str, ok := val.(fmt.Stringer); ok {
+	if str, ok := xval.Interface().(fmt.Stringer); ok {
 		return []string{str.String()}
 	}
 
 	// special case for `json` tag
 	if s.TagName == "json" {
-		if str, ok := val.(json.Marshaler); ok {
+		if str, ok := xval.Interface().(json.Marshaler); ok {
 			if st, err := str.MarshalJSON(); err == nil {
 				return []string{string(st)}
 			}
@@ -502,7 +537,7 @@ func (s *Struct) stringListValue(val interface{}) []string {
 	}
 
 	// use Sprintf's %v to convert to string
-	return []string{fmt.Sprintf("%v", val)}
+	return []string{fmt.Sprintf("%v", xval.Interface())}
 }
 
 func (s *Struct) stringValue(val interface{}) string {
@@ -633,14 +668,12 @@ func (s *Struct) nested(val reflect.Value) interface{} {
 		n := New(val.Interface())
 		n.TagName = s.TagName
 		n.FlattenAnonymous = s.FlattenAnonymous
-		m := n.Map()
-
 		// do not add the converted value if there are no exported fields, ie:
 		// time.Time
-		if len(m) == 0 {
-			finalVal = val.Interface()
+		if n.structFieldsCount() > 0 {
+			finalVal = n.Map()
 		} else {
-			finalVal = m
+			finalVal = val.Interface()
 		}
 	case reflect.Map:
 		// get the element type of the map
